@@ -51,3 +51,10 @@ pub async fn initialize(
 
     Ok(())
 }
+
+/// Diagnostic: test that rayon thread pool works by running a parallel sum.
+#[wasm_bindgen]
+pub fn test_rayon() -> u64 {
+    use rayon::prelude::*;
+    (0u64..1000).into_par_iter().sum()
+}

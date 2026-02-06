@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>tlsn-wasm-notarize test</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+    button { background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; padding: 8px 16px; cursor: pointer; font-family: monospace; }
+    button:hover { background: #0f3460; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #log { background: #0a0a1a; border: 1px solid #333; padding: 12px; max-height: 600px; overflow-y: auto; white-space: pre-wrap; font-size: 13px; line-height: 1.5; }
+    .ok { color: #4ade80; }
+    .err { color: #f87171; }
+    .info { color: #60a5fa; }
+    .warn { color: #fbbf24; }
+    h1 { color: #e2e8f0; font-size: 18px; }
+    label { display: block; margin: 8px 0 4px; color: #94a3b8; }
+    input { background: #0a0a1a; color: #e0e0e0; border: 1px solid #333; padding: 6px; width: 400px; font-family: monospace; }
+    .controls { margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <h1>tlsn-wasm-notarize — E2E Test</h1>
+
+  <div class="controls">
+    <label>Notary URL</label>
+    <input id="notaryUrl" value="http://localhost:7047" />
+
+    <label>Target URL (GET)</label>
+    <input id="targetUrl" value="https://api.github.com/zen" />
+
+    <label>Target Host</label>
+    <input id="targetHost" value="api.github.com" />
+
+    <label>Thread count</label>
+    <input id="threadCount" value="4" type="number" />
+  </div>
+
+  <button id="runBtn">Run Notarization Test</button>
+  <div id="log"></div>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const runBtn = document.getElementById('runBtn');
+
+    function log(msg, cls) {
+      const line = document.createElement('span');
+      if (cls) line.className = cls;
+      line.textContent = '[' + new Date().toISOString().slice(11, 23) + '] ' + msg + '\n';
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // Create module worker
+    const worker = new Worker('./worker.js', { type: 'module' });
+
+    let initDone = false;
+
+    worker.onmessage = (e) => {
+      const { type, msg, cls, step } = e.data;
+      if (type === 'log') log(msg, cls);
+      if (type === 'error') { log('ERROR: ' + msg, 'err'); runBtn.disabled = false; }
+      if (type === 'done' && step === 'init') { initDone = true; log('Worker ready', 'ok'); }
+      if (type === 'done' && step === 'run') { runBtn.disabled = false; }
+    };
+
+    worker.onerror = (e) => {
+      log('WORKER ERROR: ' + e.message + ' (' + e.filename + ':' + e.lineno + ')', 'err');
+    };
+
+    // Initialize on load
+    log('Sending init to worker (crossOriginIsolated=' + self.crossOriginIsolated + ')', 'info');
+    worker.postMessage({
+      type: 'init',
+      data: { threadCount: parseInt(document.getElementById('threadCount').value) || 4 },
+    });
+
+    runBtn.addEventListener('click', async () => {
+      runBtn.disabled = true;
+
+      const notaryUrl = document.getElementById('notaryUrl').value;
+      const targetUrl = document.getElementById('targetUrl').value;
+      const targetHost = document.getElementById('targetHost').value;
+
+      if (!initDone) {
+        log('Worker not initialized yet — wait for "Worker ready"', 'warn');
+        runBtn.disabled = false;
+        return;
+      }
+
+      // Create session on main thread (fetch works here)
+      log('Creating notary session...', 'info');
+      try {
+        const res = await fetch(notaryUrl + '/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ maxSentData: 4096, maxRecvData: 16384 }),
+        });
+        if (!res.ok) throw new Error('Session creation failed: ' + res.status);
+        const { sessionId } = await res.json();
+        log('Session created: ' + sessionId, 'ok');
+
+        // Send to worker
+        worker.postMessage({
+          type: 'run',
+          data: { notaryUrl, targetUrl, targetHost, sessionId },
+        });
+      } catch (err) {
+        log('ERROR: ' + (err.message || err), 'err');
+        runBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

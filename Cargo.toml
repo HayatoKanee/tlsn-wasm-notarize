@@ -21,9 +21,10 @@ panic = "abort"
 codegen-units = 1
 
 [dependencies]
-tlsn = { git = "https://github.com/tlsnotary/tlsn.git", rev = "be652a9", features = ["web", "mozilla-certs"] }
-tlsn-core = { git = "https://github.com/tlsnotary/tlsn.git", rev = "be652a9" }
-tlsn-formats = { git = "https://github.com/tlsnotary/tlsn.git", rev = "be652a9" }
+tlsn = { git = "https://github.com/tlsnotary/tlsn.git", tag = "v0.1.0-alpha.14", features = ["web", "mozilla-certs"] }
+tlsn-core = { git = "https://github.com/tlsnotary/tlsn.git", tag = "v0.1.0-alpha.14" }
+tlsn-formats = { git = "https://github.com/tlsnotary/tlsn.git", tag = "v0.1.0-alpha.14" }
+tlsn-tls-client-async = { git = "https://github.com/tlsnotary/tlsn.git", tag = "v0.1.0-alpha.14" }
 
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -39,6 +40,7 @@ hex = "0.4"
 http-body-util = "0.1"
 hyper = { version = "1.1", features = ["client", "http1"] }
 pin-project-lite = "0.2"
+parking_lot = { version = "0.12", features = ["nightly"] }
 rayon = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

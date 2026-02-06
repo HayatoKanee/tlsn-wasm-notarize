@@ -18,7 +18,7 @@ use tlsn::{
         tls_commit::{mpc::MpcTlsConfig, TlsCommitConfig},
     },
     connection::{HandshakeData, ServerName},
-    prover::{state, Prover, ProverOutput, TlsConnection},
+    prover::{state, Prover, ProverOutput},
     transcript::TranscriptCommitConfig,
     webpki::{CertificateDer, PrivateKeyDer, RootCertStore},
     Session, SessionHandle,
@@ -28,6 +28,8 @@ use tracing::info;
 use wasm_bindgen::{prelude::*, JsError};
 use wasm_bindgen_futures::spawn_local;
 use ws_stream_wasm::{WsMeta, WsStreamIo};
+
+use tls_client_async::TlsConnection;
 
 use crate::{io::FuturesIo, types::*};
 
@@ -211,6 +213,7 @@ impl JsProver {
 
         let (tls_conn, prover_fut) = prover
             .connect(tls_config, server_conn.into_io())
+            .await
             .map_err(|e| JsError::new(&e.to_string()))?;
 
         info!("sending request");
@@ -347,25 +350,39 @@ impl JsProver {
             .map_err(|_| JsError::new("session driver channel cancelled"))?
             .map_err(|e| JsError::new(&format!("session driver error: {e}")))?;
 
-        // Step 9: Send attestation request to notary
+        // Step 9: Send attestation request to notary (length-prefixed)
         let request_bytes = bincode::serialize(&request)
             .map_err(|e| JsError::new(&format!("failed to serialize request: {e}")))?;
 
         info!("sending attestation request ({} bytes)", request_bytes.len());
 
+        // Send length prefix (8 bytes, little-endian u64) then payload.
+        // We cannot use close() to signal EOF because WebSocket close is
+        // bidirectional — it would kill the connection before the server
+        // can send the attestation back.
+        let len_bytes = (request_bytes.len() as u64).to_le_bytes();
+        socket
+            .write_all(&len_bytes)
+            .await
+            .map_err(|e| JsError::new(&format!("failed to send request length: {e}")))?;
         socket
             .write_all(&request_bytes)
             .await
             .map_err(|e| JsError::new(&format!("failed to send request: {e}")))?;
-        socket
-            .close()
-            .await
-            .map_err(|e| JsError::new(&format!("failed to close write end: {e}")))?;
 
-        // Step 10: Receive attestation from notary
-        let mut attestation_bytes = Vec::new();
+        // Step 10: Receive attestation from notary (length-prefixed)
+        let mut len_buf = [0u8; 8];
         socket
-            .read_to_end(&mut attestation_bytes)
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(|e| JsError::new(&format!("failed to read attestation length: {e}")))?;
+        let att_len = u64::from_le_bytes(len_buf) as usize;
+
+        info!("reading attestation ({} bytes)", att_len);
+
+        let mut attestation_bytes = vec![0u8; att_len];
+        socket
+            .read_exact(&mut attestation_bytes)
             .await
             .map_err(|e| JsError::new(&format!("failed to read attestation: {e}")))?;
 
@@ -416,7 +433,7 @@ async fn send_request(conn: TlsConnection, request: HttpRequest) -> Result<HttpR
     // Consume the body to ensure the full response is read into the transcript.
     let _body = body.collect().await?;
 
-    let headers = response
+    let headers: Vec<(String, Vec<u8>)> = response
         .headers
         .into_iter()
         .map(|(k, v)| {
