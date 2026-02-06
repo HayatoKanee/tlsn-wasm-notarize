@@ -1,0 +1,53 @@
+[package]
+name = "tlsn-wasm-notarize"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/HayatoKanee/tlsn-wasm-notarize"
+description = "WASM bindings for TLSNotary attestation (notarize + presentation)."
+license = "MIT OR Apache-2.0"
+keywords = ["tls", "tlsn", "tlsnotary", "wasm", "attestation"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+no-bundler = ["web-spawn/no-bundler"]
+
+[profile.wasm]
+inherits = "release"
+lto = true
+panic = "abort"
+codegen-units = 1
+
+[dependencies]
+tlsn = { git = "https://github.com/tlsnotary/tlsn.git", rev = "be652a9", features = ["web", "mozilla-certs"] }
+tlsn-core = { git = "https://github.com/tlsnotary/tlsn.git", rev = "be652a9" }
+tlsn-formats = { git = "https://github.com/tlsnotary/tlsn.git", rev = "be652a9" }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-spawn = "0.2"
+ws_stream_wasm = "0.7.5"
+
+async_io_stream = "0.3"
+console_error_panic_hook = "0.1"
+enum-try-as-inner = "0.1"
+futures = "0.3"
+bincode = "1.3"
+hex = "0.4"
+http-body-util = "0.1"
+hyper = { version = "1.1", features = ["client", "http1"] }
+pin-project-lite = "0.2"
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+time = { version = "=0.3.37", features = ["wasm-bindgen"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["time"] }
+tracing-web = "0.1"
+tsify-next = { version = "0.5", default-features = false, features = ["js"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
