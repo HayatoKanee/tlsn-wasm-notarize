@@ -32,6 +32,7 @@ use ws_stream_wasm::{WsMeta, WsStreamIo};
 use tls_client_async::TlsConnection;
 
 use crate::{io::FuturesIo, types::*};
+use serde::Deserialize;
 
 type Result<T> = std::result::Result<T, JsError>;
 
@@ -248,7 +249,28 @@ impl JsProver {
     /// Commits all transcript data, builds an AttestationRequest, sends it to
     /// the notary over the reclaimed session socket, and receives back a signed
     /// Attestation. Returns hex-encoded bincode of both the Attestation and Secrets.
-    pub async fn notarize(&mut self) -> Result<NotarizeOutput> {
+    ///
+    /// `redact` is an optional JS array of `{ start: number, end: number }`
+    /// byte ranges in the sent transcript that contain secrets. When provided,
+    /// additional sub-range commits are added so the cover algorithm can match
+    /// reveal ranges that skip the secret bytes within an HTTP field.
+    pub async fn notarize(&mut self, redact: JsValue) -> Result<NotarizeOutput> {
+        // Parse optional redact ranges from JS
+        #[derive(Deserialize)]
+        struct ByteRange {
+            start: usize,
+            end: usize,
+        }
+
+        let redact_sent: Vec<std::ops::Range<usize>> =
+            if redact.is_undefined() || redact.is_null() {
+                Vec::new()
+            } else {
+                let ranges: Vec<ByteRange> = serde_wasm_bindgen::from_value(redact)
+                    .map_err(|e| JsError::new(&format!("invalid redact ranges: {e}")))?;
+                ranges.into_iter().map(|r| r.start..r.end).collect()
+            };
+
         let State::Committed {
             mut prover,
             handle,
@@ -268,6 +290,35 @@ impl JsProver {
         DefaultHttpCommitter::default()
             .commit_transcript(&mut commit_builder, &transcript)
             .map_err(|e| JsError::new(&format!("failed to commit transcript: {e}")))?;
+
+        // Step 1.5: Add sub-range commits for byte-level redaction.
+        //
+        // DefaultHttpCommitter commits each HTTP field (request line, headers,
+        // body) as a single hash. If a field contains a secret (e.g. access_token
+        // in the request line), the entire field must be hidden — there's no
+        // committed sub-range for the cover algorithm to match against a partial
+        // reveal.
+        //
+        // Fix: compute the non-redacted sub-ranges of the sent transcript and
+        // add them as additional commits. The cover algorithm can then match
+        // reveal ranges that skip only the secret bytes.
+        if !redact_sent.is_empty() {
+            let sent_len = prover.transcript().sent().len();
+            let safe_ranges = subtract_ranges(0..sent_len, &redact_sent);
+            info!(
+                "adding {} sub-range commits for byte-level redaction ({} redact ranges)",
+                safe_ranges.len(),
+                redact_sent.len()
+            );
+            for range in safe_ranges {
+                commit_builder
+                    .commit_sent(&range)
+                    .map_err(|e| {
+                        JsError::new(&format!("failed to add sub-range commit: {e}"))
+                    })?;
+            }
+        }
+
         let transcript_commit = commit_builder
             .build()
             .map_err(|e| JsError::new(&format!("failed to build transcript commit: {e}")))?;
@@ -418,6 +469,40 @@ impl JsProver {
     }
 }
 
+/// Subtract redact ranges from a base range, returning non-redacted segments.
+///
+/// Given base range [0..100] and redact ranges [20..30, 50..60], returns
+/// [0..20, 30..50, 60..100].
+fn subtract_ranges(
+    base: std::ops::Range<usize>,
+    redact: &[std::ops::Range<usize>],
+) -> Vec<std::ops::Range<usize>> {
+    let mut sorted: Vec<_> = redact.to_vec();
+    sorted.sort_by_key(|r| r.start);
+
+    let mut result = Vec::new();
+    let mut cursor = base.start;
+
+    for r in &sorted {
+        // Skip ranges outside our base
+        if r.end <= base.start || r.start >= base.end {
+            continue;
+        }
+        let r_start = r.start.max(base.start);
+        let r_end = r.end.min(base.end);
+        if r_start > cursor {
+            result.push(cursor..r_start);
+        }
+        cursor = cursor.max(r_end);
+    }
+
+    if cursor < base.end {
+        result.push(cursor..base.end);
+    }
+
+    result
+}
+
 async fn send_request(conn: TlsConnection, request: HttpRequest) -> Result<HttpResponse> {
     let conn = FuturesIo::new(conn);
     let request = hyper::Request::<Full<Bytes>>::try_from(request)?;
@@ -448,4 +533,79 @@ async fn send_request(conn: TlsConnection, request: HttpRequest) -> Result<HttpR
         status: response.status.as_u16(),
         headers,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::subtract_ranges;
+
+    #[test]
+    fn subtract_single_middle() {
+        // Base: [0..100], Redact: [20..30] → [0..20, 30..100]
+        let result = subtract_ranges(0..100, &[20..30]);
+        assert_eq!(result, vec![0..20, 30..100]);
+    }
+
+    #[test]
+    fn subtract_multiple() {
+        // Base: [0..100], Redact: [20..30, 50..60] → [0..20, 30..50, 60..100]
+        let result = subtract_ranges(0..100, &[20..30, 50..60]);
+        assert_eq!(result, vec![0..20, 30..50, 60..100]);
+    }
+
+    #[test]
+    fn subtract_at_start() {
+        // Base: [0..100], Redact: [0..10] → [10..100]
+        let result = subtract_ranges(0..100, &[0..10]);
+        assert_eq!(result, vec![10..100]);
+    }
+
+    #[test]
+    fn subtract_at_end() {
+        // Base: [0..100], Redact: [90..100] → [0..90]
+        let result = subtract_ranges(0..100, &[90..100]);
+        assert_eq!(result, vec![0..90]);
+    }
+
+    #[test]
+    fn subtract_overlapping() {
+        // Base: [0..100], Redact: [20..40, 30..50] → [0..20, 50..100]
+        let result = subtract_ranges(0..100, &[20..40, 30..50]);
+        assert_eq!(result, vec![0..20, 50..100]);
+    }
+
+    #[test]
+    fn subtract_unsorted() {
+        // Redact ranges in reverse order — should still work
+        let result = subtract_ranges(0..100, &[50..60, 20..30]);
+        assert_eq!(result, vec![0..20, 30..50, 60..100]);
+    }
+
+    #[test]
+    fn subtract_nothing() {
+        // No redact ranges → full base returned
+        let result = subtract_ranges(0..100, &[]);
+        assert_eq!(result, vec![0..100]);
+    }
+
+    #[test]
+    fn subtract_everything() {
+        // Redact covers entire base → empty result
+        let result = subtract_ranges(0..100, &[0..100]);
+        assert_eq!(result, vec![]);
+    }
+
+    #[test]
+    fn subtract_outside_base() {
+        // Redact range outside base → full base returned
+        let result = subtract_ranges(10..50, &[0..5, 60..70]);
+        assert_eq!(result, vec![10..50]);
+    }
+
+    #[test]
+    fn subtract_partial_overlap_base() {
+        // Redact extends beyond base boundaries
+        let result = subtract_ranges(10..50, &[5..20, 40..60]);
+        assert_eq!(result, vec![20..40]);
+    }
 }
