@@ -11,7 +11,7 @@ keywords = ["tls", "tlsn", "tlsnotary", "wasm", "attestation"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["no-bundler"]
 no-bundler = ["web-spawn/no-bundler"]
 
 [profile.wasm]
